@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Электронный журнал расписания</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Supabase JS Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    .vertical-text {
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+    }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800 min-h-screen font-sans">
+  <div id="app" class="max-w-7xl mx-auto p-3 sm:p-6 space-y-4">
+    
+    <!-- Шапка управления -->
+    <header class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <div class="flex items-center gap-2">
+          <h1 class="text-xl font-bold text-slate-900">Журнал учебных занятий</h1>
+          <span id="syncStatus" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            Облако подключено
+          </span>
+        </div>
+        <p class="text-xs text-slate-500 mt-0.5">Пятидневная учебная сетка с мгновенной синхронизацией</p>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button id="btnScheduleView" class="px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white transition">Календарь</button>
+        <button id="btnPresetsView" class="px-4 py-2 text-sm font-medium rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 transition">Мои группы и предметы</button>
+      </div>
+    </header>
+
+    <!-- СЕКЦИЯ 1: СПРАВОЧНИК ГРУПП И ПРЕДМЕТОВ -->
+    <section id="presetsSection" class="hidden bg-white p-5 rounded-xl shadow-sm border border-slate-200 space-y-5">
+      <h2 class="text-lg font-bold text-slate-800 border-b pb-2">Справочник групп и дисциплин</h2>
+      <p class="text-sm text-slate-600">Добавьте ваши связки «Группа — Предмет». Они сразу станут доступны во всех выпадающих списках на всех ваших устройствах.</p>
+
+      <form id="addPresetForm" class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <input id="inputGroup" type="text" placeholder="Шифр группы (напр. БПК-13)" required class="border border-slate-300 rounded-lg p-2.5 text-sm outline-none focus:border-indigo-500" />
+        <input id="inputSubject" type="text" placeholder="Дисциплина (напр. ОУД.05 Информатика)" required class="border border-slate-300 rounded-lg p-2.5 text-sm outline-none focus:border-indigo-500" />
+        <button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg p-2.5 text-sm font-semibold transition">Добавить в облако</button>
+      </form>
+
+      <div class="mt-4">
+        <h3 class="text-sm font-semibold text-slate-700 mb-2">Сохраненные дисциплины:</h3>
+        <ul id="presetsList" class="divide-y divide-slate-100 border border-slate-200 rounded-lg max-h-60 overflow-y-auto"></ul>
+      </div>
+    </section>
+
+    <!-- СЕКЦИЯ 2: СЕТКА КАЛЕНДАРЯ -->
+    <main id="scheduleSection" class="space-y-4">
+      <!-- Навигация по неделям -->
+      <div class="bg-white p-3 rounded-xl shadow-sm border border-slate-200 flex items-center justify-between">
+        <button id="prevWeekBtn" class="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-sm font-semibold">← Пред. неделя</button>
+        <div id="weekRangeLabel" class="text-sm font-bold text-slate-800 text-center"></div>
+        <button id="nextWeekBtn" class="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-sm font-semibold">След. неделя →</button>
+      </div>
+
+      <!-- Мобильный переключатель дней (для экрана телефона вертикально) -->
+      <div id="mobileDaySelector" class="flex lg:hidden bg-white p-1 rounded-xl shadow-sm border border-slate-200 gap-1 overflow-x-auto"></div>
+
+      <!-- Контейнер дней: 5 колонок на ПК/планшете, 1 на смартфоне -->
+      <div id="daysContainer" class="grid grid-cols-1 lg:grid-cols-5 gap-4 items-start"></div>
+    </main>
+  </div>
+
+  <script>
+    // Подключение к Supabase
+    const SUPABASE_URL = 'https://rlrvhutoqrvkzahwbbwv.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJscnZodXRvcXJ2a3phaHdiYnd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg5NDYxMDUsImV4cCI6MjEwNDUyMjEwNX0.7R1paBBIYLdQcpKtRhdlvj_wYR-VGl0la04jjBgnSKk';
+    const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    let presets = [];
+    let schedule = {}; // ключ: "YYYY-MM-DD", значение: массив из 5 элементов
+    let currentMonday = getMonday(new Date());
+    let activeMobileDayIndex = 0;
+
+    const dayNames = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница'];
+
+    function getMonday(d) {
+      const date = new Date(d);
+      const day = date.getDay();
+      const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+      const monday = new Date(date.setDate(diff));
+      monday.setHours(0, 0, 0, 0);
+      return monday;
+    }
+
+    function formatDateKey(date) {
+      return date.toISOString().split('T')[0];
+    }
+
+    function formatDisplayDate(date) {
+      const d = String(date.getDate()).padStart(2, '0');
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const y = date.getFullYear();
+      return `${d}.${m}.${y}`;
+    }
+
+    // Вкладки
+    const btnSchedule = document.getElementById('btnScheduleView');
+    const btnPresets = document.getElementById('btnPresetsView');
+    const presetsSection = document.getElementById('presetsSection');
+    const scheduleSection = document.getElementById('scheduleSection');
+
+    btnSchedule.addEventListener('click', () => {
+      btnSchedule.className = 'px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white transition';
+      btnPresets.className = 'px-4 py-2 text-sm font-medium rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 transition';
+      presetsSection.classList.add('hidden');
+      scheduleSection.classList.remove('hidden');
+      renderSchedule();
+    });
+
+    btnPresets.addEventListener('click', () => {
+      btnPresets.className = 'px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white transition';
+      btnSchedule.className = 'px-4 py-2 text-sm font-medium rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 transition';
+      scheduleSection.classList.add('hidden');
+      presetsSection.classList.remove('hidden');
+      renderPresets();
+    });
+
+    // Загрузка данных из Supabase
+    async function initData() {
+      // 1. Читаем пресеты
+      const { data: pData } = await db.from('presets').select('*').order('created_at', { ascending: true });
+      if (pData) {
+        presets = pData.map(item => ({ id: item.id, group: item.group_name, subject: item.subject }));
+      }
+
+      // 2. Читаем слоты расписания
+      const { data: sData } = await db.from('schedule_slots').select('*');
+      if (sData) {
+        schedule = {};
+        sData.forEach(row => {
+          if (!schedule[row.date_key]) schedule[row.date_key] = [{}, {}, {}, {}, {}];
+          schedule[row.date_key][row.slot_index] = {
+            presetId: row.preset_id || '',
+            isReplacement: row.is_replacement || false
+          };
+        });
+      }
+
+      renderSchedule();
+      renderPresets();
+
+      // Подписка на обновления в реальном времени (Realtime)
+      db.channel('realtime_schedule')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'schedule_slots' }, (payload) => {
+          const row = payload.new;
+          if (row && row.date_key) {
+            if (!schedule[row.date_key]) schedule[row.date_key] = [{}, {}, {}, {}, {}];
+            schedule[row.date_key][row.slot_index] = {
+              presetId: row.preset_id || '',
+              isReplacement: row.is_replacement || false
+            };
+            renderSchedule();
+          }
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'presets' }, async () => {
+          const { data } = await db.from('presets').select('*').order('created_at', { ascending: true });
+          if (data) {
+            presets = data.map(item => ({ id: item.id, group: item.group_name, subject: item.subject }));
+            renderPresets();
+            renderSchedule();
+          }
+        })
+        .subscribe();
+    }
+
+    // Сохранение предмета в облако
+    document.getElementById('addPresetForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const groupInput = document.getElementById('inputGroup');
+      const subjectInput = document.getElementById('inputSubject');
+      const newPreset = {
+        id: Date.now().toString(),
+        group_name: groupInput.value.trim(),
+        subject: subjectInput.value.trim()
+      };
+
+      await db.from('presets').insert([newPreset]);
+      groupInput.value = '';
+      subjectInput.value = '';
+    });
+
+    async function deletePreset(id) {
+      await db.from('presets').delete().eq('id', id);
+    }
+
+    function renderPresets() {
+      const list = document.getElementById('presetsList');
+      list.innerHTML = '';
+      if (presets.length === 0) {
+        list.innerHTML = '<li class="p-3 text-sm text-slate-400">Список пока пуст</li>';
+        return;
+      }
+      presets.forEach(p => {
+        const li = document.createElement('li');
+        li.className = 'p-3 flex justify-between items-center text-sm hover:bg-slate-50';
+        li.innerHTML = `
+          <div>
+            <span class="font-bold text-slate-900">${p.group}</span> — 
+            <span class="text-slate-600">${p.subject}</span>
+          </div>
+          <button onclick="deletePreset('${p.id}')" class="text-rose-600 hover:text-rose-800 text-xs font-semibold">Удалить</button>
+        `;
+        list.appendChild(li);
+      });
+    }
+
+    // Отрисовка расписания
+    function renderSchedule() {
+      const friday = new Date(currentMonday);
+      friday.setDate(friday.getDate() + 4);
+      document.getElementById('weekRangeLabel').textContent = 
+        `${formatDisplayDate(currentMonday)} — ${formatDisplayDate(friday)}`;
+
+      // Мобильная панель переключения дней
+      const mobileNav = document.getElementById('mobileDaySelector');
+      mobileNav.innerHTML = '';
+      for (let i = 0; i < 5; i++) {
+        const btn = document.createElement('button');
+        const isActive = i === activeMobileDayIndex;
+        btn.className = `flex-1 py-1.5 px-2 rounded-lg text-xs font-semibold text-center whitespace-nowrap transition ${
+          isActive ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+        }`;
+        btn.textContent = dayNames[i].slice(0, 2);
+        btn.onclick = () => {
+          activeMobileDayIndex = i;
+          renderSchedule();
+        };
+        mobileNav.appendChild(btn);
+      }
+
+      const container = document.getElementById('daysContainer');
+      container.innerHTML = '';
+
+      for (let i = 0; i < 5; i++) {
+        const dayDate = new Date(currentMonday);
+        dayDate.setDate(dayDate.getDate() + i);
+        const dateKey = formatDateKey(dayDate);
+        const daySchedule = schedule[dateKey] || [{}, {}, {}, {}, {}];
+
+        const card = document.createElement('div');
+        const isHiddenOnMobile = i !== activeMobileDayIndex ? 'hidden lg:flex' : 'flex';
+        card.className = `${isHiddenOnMobile} bg-white rounded-xl shadow-sm border border-red-500 overflow-hidden`;
+
+        // Левая плашка
+        const dayHeader = document.createElement('div');
+        dayHeader.className = 'w-10 sm:w-12 bg-red-50 border-r border-red-400 flex flex-col justify-between items-center py-4 select-none';
+        dayHeader.innerHTML = `
+          <div class="vertical-text text-xs font-semibold text-red-700 tracking-wider">${formatDisplayDate(dayDate)}</div>
+          <div class="vertical-text text-sm font-bold text-red-900 tracking-wide">${dayNames[i]}</div>
+        `;
+
+        // 5 слотов пар
+        const slotsContainer = document.createElement('div');
+        slotsContainer.className = 'flex-1 divide-y divide-red-200 bg-white';
+
+        for (let slotIdx = 0; slotIdx < 5; slotIdx++) {
+          const slot = daySchedule[slotIdx] || { presetId: '', isReplacement: false };
+          const row = document.createElement('div');
+          row.className = `p-2 min-h-[72px] flex flex-col justify-between transition-colors ${
+            slot.isReplacement ? 'bg-amber-50/70' : 'bg-white'
+          }`;
+
+          const topRow = document.createElement('div');
+          topRow.className = 'flex items-center justify-between mb-1';
+          topRow.innerHTML = `
+            <span class="text-[11px] font-bold text-slate-400">№${slotIdx + 1}</span>
+            <button 
+              onclick="toggleReplacement('${dateKey}', ${slotIdx})" 
+              title="Нажмите для смены статуса"
+              class="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider transition ${
+                slot.isReplacement 
+                  ? 'bg-amber-500 text-white shadow-xs' 
+                  : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+              }">
+              ${slot.isReplacement ? 'Замена' : 'По плану'}
+            </button>
+          `;
+
+          const select = document.createElement('select');
+          select.className = 'w-full text-xs font-medium text-slate-800 bg-transparent border-0 border-b border-transparent focus:border-indigo-500 focus:ring-0 p-0.5 outline-none cursor-pointer truncate';
+          
+          let optionsHtml = '<option value="">— Окно / Нет пары —</option>';
+          presets.forEach(p => {
+            const isSelected = slot.presetId === p.id ? 'selected' : '';
+            optionsHtml += `<option value="${p.id}" ${isSelected}>${p.group} — ${p.subject}</option>`;
+          });
+          select.innerHTML = optionsHtml;
+
+          select.onchange = (e) => {
+            updateSlotData(dateKey, slotIdx, e.target.value, slot.isReplacement);
+          };
+
+          row.appendChild(topRow);
+          row.appendChild(select);
+          slotsContainer.appendChild(row);
+        }
+
+        card.appendChild(dayHeader);
+        card.appendChild(slotsContainer);
+        container.appendChild(card);
+      }
+    }
+
+    async function updateSlotData(dateKey, slotIndex, presetId, isReplacement) {
+      if (!schedule[dateKey]) schedule[dateKey] = [{}, {}, {}, {}, {}];
+      schedule[dateKey][slotIndex] = { presetId, isReplacement };
+
+      const slotId = `${dateKey}_${slotIndex}`;
+      await db.from('schedule_slots').upsert({
+        id: slotId,
+        date_key: dateKey,
+        slot_index: slotIndex,
+        preset_id: presetId,
+        is_replacement: isReplacement,
+        updated_at: new Date()
+      });
+    }
+
+    async function toggleReplacement(dateKey, slotIndex) {
+      if (!schedule[dateKey]) schedule[dateKey] = [{}, {}, {}, {}, {}];
+      const currentSlot = schedule[dateKey][slotIndex] || { presetId: '', isReplacement: false };
+      const nextStatus = !currentSlot.isReplacement;
+
+      schedule[dateKey][slotIndex] = {
+        ...currentSlot,
+        isReplacement: nextStatus
+      };
+      renderSchedule();
+
+      const slotId = `${dateKey}_${slotIndex}`;
+      await db.from('schedule_slots').upsert({
+        id: slotId,
+        date_key: dateKey,
+        slot_index: slotIndex,
+        preset_id: currentSlot.presetId || '',
+        is_replacement: nextStatus,
+        updated_at: new Date()
+      });
+    }
+
+    document.getElementById('prevWeekBtn').onclick = () => {
+      currentMonday.setDate(currentMonday.getDate() - 7);
+      renderSchedule();
+    };
+
+    document.getElementById('nextWeekBtn').onclick = () => {
+      currentMonday.setDate(currentMonday.getDate() + 7);
+      renderSchedule();
+    };
+
+    // Старт
+    initData();
+  </script>
+</body>
+</html>
